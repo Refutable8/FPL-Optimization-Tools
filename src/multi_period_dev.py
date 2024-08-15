@@ -38,7 +38,7 @@ def get_dict_combinations(my_dict):
         # else we have a duplicate
     return feasible_combs
 
-
+# haha
 def connect():
     print("This method is provided for people who want to automate login. However with 2FA changes, it is unlikely to work, and I'd suggest using team.json method from now on as explained in README file.")
     base_folder = Path()
