@@ -1,12 +1,12 @@
 {
-    "horizon": 5,
+    "horizon": 12,
     "decay_base": 0.84,
     "ft_value": 1.5,
     "ft_value_list": {},
     "ft_use_penalty": 0.5,
     "itb_value": 0.08,
     "itb_loss_per_transfer": 0,
-    "no_future_transfer": false,
+    "no_future_transfer": true,
     "no_transfer_last_gws": null,
     "no_transfer_by_position": [],
     "force_ft_state_lb": [],
@@ -60,5 +60,7 @@
     "data_weights": {"review": 40, "review-odds": 30, "mikkel": 30, "kiwi": 0},
     "export_data": "final.csv",
     "team_data": "json",
-    "team_id": null
+    "team_id": null,
+    "objective": "relative",
+    "ownership_type": "overall"
 }

@@ -179,6 +179,7 @@ def prep_data(my_data, options):
             break
 
     horizon = options.get('horizon', 3)
+    decay_base = options.get('decay_base', 0.84)
 
     element_data = pd.DataFrame(fpl_data['elements'])
     team_data = pd.DataFrame(fpl_data['teams'])
@@ -198,8 +199,15 @@ def prep_data(my_data, options):
     if options.get('export_data', '') != '' and datasource == 'mixed':
         data.to_csv(f"../data/{options['export_data']}")
 
-    merged_data = pd.merge(elements_team, data, left_on='id_x', right_on='review_id')
-    merged_data.set_index(['id_x'], inplace=True)
+    # Additions for relative gain
+    ## Get ownership data
+    ownership_type = options.get('ownership_type', 'overall')
+    ownership_data = pd.read_csv(options.get('data_path', f'../data/ownership_{ownership_type}.csv'))
+    ownership_data = ownership_data[['ID', 'Name', 'Current Own%']].copy()
+    ownership_review = pd.merge(ownership_data, data, on=['ID', 'Name'], how='outer')
+    ownership_review.set_index(['ID'], inplace=True)
+    merged_data = pd.merge(elements_team, ownership_review, left_on='id_x', right_on='review_id')
+    merged_data.rename(columns={'Current Own%': 'curr_own'}, inplace=True)
 
     # Check if data exists
     for week in range(gw, min(39, gw+horizon)):
@@ -209,9 +217,46 @@ def prep_data(my_data, options):
     original_keys = merged_data.columns.to_list()
     keys = [k for k in original_keys if "_Pts" in k]
     min_keys = [k for k in original_keys if "_xMins" in k]
+    # addition for relative gain
+    leverage_keys = [x.replace('_Pts', '_xNetGain') for x in keys]
+    weighted_keys = [x.replace('_Pts', '_wPts') for x in keys]
+    gain_keys = [x.replace('_Pts', '_xGain') for x in keys]
+    loss_keys = [x.replace('_Pts', '_xLoss') for x in keys]
+    xng_keys = [x.replace('_Pts', '_xNetGain') for x in keys]
+    absxng_keys = [x.replace('_Pts', '_xAbsNG') for x in keys]
+
+    merged_data = merged_data.join(pd.concat([merged_data[k].mul(
+        (1-2*merged_data['curr_own']/100) * (decay_base**(i))).to_frame(leverage_keys[i]) for i,k in enumerate(keys)],
+                                                axis=1))
+    merged_data = merged_data.join(pd.concat([merged_data[k].mul(
+        (decay_base**(i))).to_frame(weighted_keys[i]) for i,k in enumerate(keys)],
+                                                axis=1))
+    merged_data = merged_data.join(pd.concat([merged_data[k].mul(
+        ((1-merged_data['curr_own']/100) * decay_base**(i))).to_frame(gain_keys[i]) for i,k in enumerate(keys)],
+                                                axis=1))
+    merged_data = merged_data.join(pd.concat([merged_data[k].mul(
+        (merged_data['curr_own']/100 * decay_base**(i))).to_frame(loss_keys[i]) for i,k in enumerate(keys)],
+                                                axis=1))
+
+    merged_data['tot_wpts'] = merged_data[weighted_keys].sum(axis=1)
+    merged_data['net_gain'] = merged_data[leverage_keys].sum(axis=1)
+    merged_data['xgain'] = merged_data[gain_keys].sum(axis=1)
+    merged_data['xloss'] = merged_data[loss_keys].sum(axis=1)
+
+    pos_order = {'G': 0, 'D': 1, 'M': 2, 'F': 3}
+
+    merged_data = merged_data.loc[merged_data['SV'] < 98]
+
+    for col in xng_keys:
+        merged_data[col.replace('xNetGain', 'xAbsNG')] = abs(merged_data[col])
+
     merged_data['total_ev'] = merged_data[keys].sum(axis=1)
     merged_data['total_min'] = merged_data[min_keys].sum(axis=1)
+    merged_data['total_xng'] = merged_data[xng_keys].sum(axis=1)
+    merged_data['total_absxng'] = merged_data[absxng_keys].sum(axis=1)
 
+    merged_data.rename(columns={'id_x': 'ID'}, inplace=True)
+    merged_data.set_index(['ID'], inplace=True)
     merged_data.sort_values(by=['total_ev'], ascending=[False], inplace=True)
 
     locked_next_gw = [int(i[0]) for i in options.get('locked_next_gw', [])]
@@ -343,7 +388,12 @@ def solve_multi_period_fpl(data, options):
 
 
     # Data
-    problem_name = f'mp_h{horizon}_regular' if objective == 'regular' else f'mp_h{horizon}_o{objective[0]}_d{decay_base}'
+    if objective == 'regular':
+        problem_name = f'mp_h{horizon}_regular' 
+    elif objective == 'relative':
+        problem_name = f'mp_h{horizon}_relative_d{decay_base}'
+    else:
+        problem_name = f'mp_h{horizon}_o{objective[0]}_d{decay_base}'
     merged_data = data['merged_data']
     team_data = data['team_data']
     type_data = data['type_data']
@@ -730,10 +780,18 @@ def solve_multi_period_fpl(data, options):
     hit_cost = options.get('hit_cost', 4)
     gw_xp = {w: so.expr_sum(points_player_week[p,w] * (lineup[p,w] + captain[p,w] + 0.1*vicecap[p,w] + use_tc[p,w] + so.expr_sum(bench_weights[o] * bench[p,w,o] for o in order)) for p in players) for w in gameweeks}
     gw_total = {w: gw_xp[w] - hit_cost * penalized_transfers[w] + gw_ft_gain[w] - ft_penalty[w] + itb_value * in_the_bank[w] for w in gameweeks}
-    
+    # additions for relative gain
+    gw_xgain = {w: so.expr_sum(merged_data.loc[p, f'{w}_xGain'] * (lineup[p,w] + captain[p,w] + 0.1*vicecap[p,w] + so.expr_sum(bench_weights[o] * bench[p,w,o] for o in order)) for p in players) for w in gameweeks}
+    gw_xloss = {w: so.expr_sum(merged_data.loc[p, f'{w}_xLoss'] * (1 - squad[p,w]) for p in players) for w in gameweeks}
+    gw_relative_total = {w:gw_xgain[w] - gw_xloss[w] - hit_cost * penalized_transfers[w] + gw_ft_gain[w] - ft_penalty[w] + itb_value * in_the_bank[w] for w in gameweeks}
+
+
     if objective == 'regular':
         total_xp = so.expr_sum(gw_total[w] for w in gameweeks)
         model.set_objective(-total_xp, sense='N', name='total_regular_xp')
+    elif objective == 'relative':
+        total_xp = so.expr_sum(gw_relative_total[w] * pow(decay_base, w-next_gw) for w in gameweeks)
+        model.set_objective(-total_xp, sense='N', name='total_decay_relative_xp')
     else:
         decay_objective = so.expr_sum(gw_total[w] * pow(decay_base, w-next_gw) for w in gameweeks)
         model.set_objective(-decay_objective, sense='N', name='total_decay_xp')
